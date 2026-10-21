@@ -84,7 +84,8 @@ python train.py -s <path to dataset> --data_cache_mb 1024
 `--data_cache_mb` accepts a non-negative number in MiB (1 MiB = 1024² bytes).
 The default, `0`, keeps the original full-data loading behavior. With a positive
 budget, COLMAP and Blender images are decoded on demand. Each batch is sized by
-the resized floating-point image tensors, including alpha masks, rather than
+the resized floating-point image tensors, including alpha masks and enabled
+inverse-depth maps/validity masks, rather than
 compressed file sizes. Training still uses one random view per optimizer step;
 every view is visited once per shuffled epoch before starting the next epoch.
 Completed batches are released before loading the next batch. If the entire
@@ -100,8 +101,59 @@ the existing `--data_device` behavior. The setting is saved in `cfg_args`; rende
 scripts also load cameras on demand when enabled (use `--data_cache_mb 0` to
 restore eager loading).
 
-Run the data-loading regression tests in the project environment with
-`python -m unittest discover -s scripts -p test_data_cache.py` (no GPU required).
+### Depth supervision
+
+Enable depth supervision alongside batching with:
+```bash
+python train.py -s <path to dataset> --depths depths --data_cache_mb 1024 \
+    --depth_l1_weight_init 1.0 --depth_l1_weight_final 0.01
+```
+`--depths` (or `-d`) is a directory, relative to the dataset root or absolute.
+Omitting it keeps RGB-only training. COLMAP datasets use the
+[3DGS depth calibration format](https://github.com/graphdeco-inria/gaussian-splatting/blob/main/scene/dataset_readers.py):
+```text
+dataset/
+  images/frame.001.jpg
+  depths/frame.001.png
+  sparse/0/depth_params.json
+```
+Example `depth_params.json`:
+```json
+{
+  "frame.001": {"scale": 0.8, "offset": 0.02},
+  "frame.002": {"scale": 0.9, "offset": -0.01}
+}
+```
+Keys are COLMAP image names with only the final extension removed, preserving
+relative subdirectories (e.g. `camera1/frame.001`). Depth files use the same key
+with a `.png` extension. Supply **single-channel uint16 inverse-depth PNGs**,
+not metric-depth images or color visualizations. The loader divides PNG values
+by **65536**, resizes to the training resolution with bilinear interpolation,
+then applies `inverse_depth = normalized_png * scale + offset`. JSON is read
+once; the median of positive scales is computed automatically. Views with
+non-positive scales or scales outside `[0.2 * median, 5 * median]` are skipped.
+Missing JSON entries warn and skip that view; missing/malformed JSON or missing/
+invalid depth files for eligible views raise an error. An entirely ineligible
+training set raises an error when depth supervision is enabled.
+
+For Blender/NeRF Synthetic datasets, the existing `transforms_train.json` and
+`transforms_test.json` camera loading is retained. Following 3DGS, depth files
+are `<depths>/<image_basename>.png`, decoded as inverse depth using a **512**
+divisor, without a COLMAP calibration JSON.
+
+The loss compares the reciprocal of 2DGS `surf_depth` (selected by
+`--depth_ratio`) with the calibrated inverse depth. It uses masked L1 averaged
+over all image pixels. Non-positive/non-finite target depths and transparent
+pixels in images with an alpha mask are excluded. The two depth weights default
+to `1.0` and `0.01`, with exponential decay over `--iterations`; set both to `0`
+to disable the loss. Progress output includes `depth`, and TensorBoard records
+`train_loss_patches/depth_loss` and `train_loss_patches/depth_weight`.
+
+Depth and mask tensors remain on CPU until their view is used, occupy 8 bytes
+per resized pixel together, and count toward `--data_cache_mb`. They are loaded
+and released with their RGB batch. This also works with eager loading (`0`),
+validation and checkpoint resume. The depth directory is saved in `cfg_args`;
+pass `--depths ""` to render an existing model without loading supervision files.
 
 Commandline arguments for regularizations
 ```bash

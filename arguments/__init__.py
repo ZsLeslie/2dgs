@@ -51,6 +51,7 @@ class ModelParams(ParamGroup):
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
+        self._depths = ""
         self._resolution = -1
         self._white_background = False
         self.data_device = "cuda"
@@ -64,6 +65,7 @@ class ModelParams(ParamGroup):
         g.source_path = os.path.abspath(g.source_path)
         # Old cfg_args files do not contain this option.
         g.data_cache_mb = getattr(g, "data_cache_mb", 0.0)
+        g.depths = getattr(g, "depths", "")
         if not math.isfinite(g.data_cache_mb) or g.data_cache_mb < 0:
             raise ValueError("--data_cache_mb must be a finite, non-negative number (0 disables batching)")
         return g
@@ -91,6 +93,8 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = 0.2
         self.lambda_dist = 0.0
         self.lambda_normal = 0.05
+        self.depth_l1_weight_init = 1.0
+        self.depth_l1_weight_final = 0.01
         self.opacity_cull = 0.05
 
         self.densification_interval = 100
@@ -99,6 +103,15 @@ class OptimizationParams(ParamGroup):
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
         super().__init__(parser, "Optimization Parameters")
+
+    def extract(self, args):
+        group = super().extract(args)
+        weights = (group.depth_l1_weight_init, group.depth_l1_weight_final)
+        if any(not math.isfinite(w) or w < 0 for w in weights):
+            raise ValueError("Depth loss weights must be finite and non-negative")
+        if (weights[0] == 0) != (weights[1] == 0):
+            raise ValueError("Set both depth loss weights to 0 to disable supervision, or use two positive weights")
+        return group
 
 def get_combined_args(parser : ArgumentParser):
     cmdlne_string = sys.argv[1:]

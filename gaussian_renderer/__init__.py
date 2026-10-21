@@ -128,7 +128,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     # get expected depth map
     render_depth_expected = allmap[0:1]
-    render_depth_expected = (render_depth_expected / render_alpha)
+    # Avoid 0/0 in uncovered pixels, including its backward pass when depth is supervised.
+    render_depth_expected = render_depth_expected / torch.where(
+        render_alpha > 0, render_alpha, torch.ones_like(render_alpha))
     render_depth_expected = torch.nan_to_num(render_depth_expected, 0, 0)
     
     # get depth distortion map

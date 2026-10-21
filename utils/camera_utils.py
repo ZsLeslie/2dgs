@@ -14,6 +14,7 @@ import numpy as np
 from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal
 from utils.image_loading import ImageSource
+from utils.depth_utils import depth_is_usable, load_inverse_depth
 from collections.abc import Sequence
 import torch
 
@@ -60,10 +61,13 @@ def loadCam(args, id, cam_info, resolution_scale):
         if lazy:
             image.close()
 
+    invdepthmap, depth_mask = load_inverse_depth(cam_info, resolution, loaded_mask)
+
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device)
+                  image_name=cam_info.image_name, uid=id, data_device=args.data_device,
+                  invdepthmap=invdepthmap, depth_mask=depth_mask)
 
 class CameraDataset(Sequence):
     """List-like camera metadata; indexing loads only the requested image."""
@@ -77,7 +81,10 @@ class CameraDataset(Sequence):
         self.image_sizes = []
         for info in cam_infos:
             width, height = camera_resolution(args, info, resolution_scale)
-            self.image_sizes.append(width * height * min(info.image.channels, 4) * pixel_bytes)
+            bytes_per_pixel = min(info.image.channels, 4) * pixel_bytes
+            if depth_is_usable(info):
+                bytes_per_pixel += 8  # float32 inverse depth + float32 validity mask
+            self.image_sizes.append(width * height * bytes_per_pixel)
 
     def __len__(self):
         return len(self.cam_infos)
