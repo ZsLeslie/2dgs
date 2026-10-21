@@ -3,6 +3,7 @@
 output
 build
 data
+tests
 *.ply
 **/PKG-INFO
 # submodules

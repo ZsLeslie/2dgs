@@ -22,6 +22,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr, render_net_image
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from utils.data_cache import CameraBatchSampler
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -45,6 +46,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     iter_end = torch.cuda.Event(enable_timing = True)
 
     viewpoint_stack = None
+    camera_sampler = None
+    if getattr(dataset, "data_cache_mb", 0) > 0:
+        camera_sampler = CameraBatchSampler(scene.getTrainCameras(), dataset.data_cache_mb)
+        print("Training image batch budget: {:.2f} MiB".format(dataset.data_cache_mb))
     ema_loss_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
@@ -62,9 +67,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             gaussians.oneupSHdegree()
 
         # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        if camera_sampler is not None:
+            # Release the previous view before the sampler replaces its batch.
+            viewpoint_cam = None
+            gt_image = None
+            viewpoint_cam = next(camera_sampler)
+        else:
+            if not viewpoint_stack:
+                viewpoint_stack = scene.getTrainCameras().copy()
+            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
@@ -200,14 +211,19 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     # Report test and samples of training set
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+        train_cameras = scene.getTrainCameras()
+        test_cameras = scene.getTestCameras()
+        validation_configs = (
+            {'name': 'test', 'cameras': test_cameras, 'indices': range(len(test_cameras))},
+            {'name': 'train', 'cameras': train_cameras,
+             'indices': [idx % len(train_cameras) for idx in range(5, 30, 5)] if len(train_cameras) else []})
 
         for config in validation_configs:
-            if config['cameras'] and len(config['cameras']) > 0:
+            if len(config['indices']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
-                for idx, viewpoint in enumerate(config['cameras']):
+                for idx, camera_index in enumerate(config['indices']):
+                    viewpoint = config['cameras'][camera_index]
                     render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0).to("cuda")
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
@@ -239,9 +255,11 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
+                    # Lazy datasets must not retain the previous validation image.
+                    del viewpoint, gt_image
 
-                psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])
+                psnr_test /= len(config['indices'])
+                l1_test /= len(config['indices'])
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)

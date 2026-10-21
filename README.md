@@ -77,6 +77,32 @@ To train a scene, simply use
 ```bash
 python train.py -s <path to COLMAP or NeRF Synthetic dataset>
 ```
+To train with images loaded in memory-budgeted batches:
+```bash
+python train.py -s <path to dataset> --data_cache_mb 1024
+```
+`--data_cache_mb` accepts a non-negative number in MiB (1 MiB = 1024² bytes).
+The default, `0`, keeps the original full-data loading behavior. With a positive
+budget, COLMAP and Blender images are decoded on demand. Each batch is sized by
+the resized floating-point image tensors, including alpha masks, rather than
+compressed file sizes. Training still uses one random view per optimizer step;
+every view is visited once per shuffled epoch before starting the next epoch.
+Completed batches are released before loading the next batch. If the entire
+training set fits, it stays cached across epochs. An image larger than the budget
+is loaded alone with a warning; use a larger budget or a lower image resolution
+to avoid this exception.
+
+The budget covers cached training pixels, not total process RAM or GPU memory:
+model/optimizer state, camera matrices, temporary image decoding buffers and one
+validation view require additional memory. Validation images are loaded one at a
+time. RGB tensors remain on CPU until used by training, and alpha masks retain
+the existing `--data_device` behavior. The setting is saved in `cfg_args`; render
+scripts also load cameras on demand when enabled (use `--data_cache_mb 0` to
+restore eager loading).
+
+Run the data-loading regression tests in the project environment with
+`python -m unittest discover -s scripts -p test_data_cache.py` (no GPU required).
+
 Commandline arguments for regularizations
 ```bash
 --lambda_normal  # hyperparameter for normal consistency

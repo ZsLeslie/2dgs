@@ -13,10 +13,13 @@ from scene.cameras import Camera
 import numpy as np
 from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal
+from utils.image_loading import ImageSource
+from collections.abc import Sequence
+import torch
 
 WARNED = False
 
-def loadCam(args, id, cam_info, resolution_scale):
+def camera_resolution(args, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.image.size
 
     if args.resolution in [1, 2, 4, 8]:
@@ -38,28 +41,64 @@ def loadCam(args, id, cam_info, resolution_scale):
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
-    if len(cam_info.image.split()) > 3:
-        import torch
-        resized_image_rgb = torch.cat([PILtoTorch(im, resolution) for im in cam_info.image.split()[:3]], dim=0)
-        loaded_mask = PILtoTorch(cam_info.image.split()[3], resolution)
-        gt_image = resized_image_rgb
-    else:
-        resized_image_rgb = PILtoTorch(cam_info.image, resolution)
-        loaded_mask = None
-        gt_image = resized_image_rgb
+    return resolution
+
+
+def loadCam(args, id, cam_info, resolution_scale):
+    resolution = camera_resolution(args, cam_info, resolution_scale)
+    lazy = isinstance(cam_info.image, ImageSource)
+    image = cam_info.image.open() if lazy else cam_info.image
+    try:
+        if len(image.getbands()) > 3:
+            channels = image.split()
+            gt_image = torch.cat([PILtoTorch(im, resolution) for im in channels[:3]], dim=0)
+            loaded_mask = PILtoTorch(channels[3], resolution)
+        else:
+            gt_image = PILtoTorch(image, resolution)
+            loaded_mask = None
+    finally:
+        if lazy:
+            image.close()
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device)
 
+class CameraDataset(Sequence):
+    """List-like camera metadata; indexing loads only the requested image."""
+
+    def __init__(self, cam_infos, resolution_scale, args):
+        self.cam_infos = cam_infos
+        self.resolution_scale = resolution_scale
+        self.args = args
+        # Include alpha and account for PILtoTorch's floating-point output.
+        pixel_bytes = torch.tensor([], dtype=torch.get_default_dtype()).element_size()
+        self.image_sizes = []
+        for info in cam_infos:
+            width, height = camera_resolution(args, info, resolution_scale)
+            self.image_sizes.append(width * height * min(info.image.channels, 4) * pixel_bytes)
+
+    def __len__(self):
+        return len(self.cam_infos)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        return loadCam(self.args, index, self.cam_infos[index], self.resolution_scale)
+
+    def image_nbytes(self, index):
+        return self.image_sizes[index]
+
+
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
-    camera_list = []
-
-    for id, c in enumerate(cam_infos):
-        camera_list.append(loadCam(args, id, c, resolution_scale))
-
-    return camera_list
+    if getattr(args, "data_cache_mb", 0) > 0:
+        return CameraDataset(cam_infos, resolution_scale, args)
+    return [loadCam(args, id, c, resolution_scale) for id, c in enumerate(cam_infos)]
 
 def camera_to_JSON(id, camera : Camera):
     Rt = np.zeros((4, 4))

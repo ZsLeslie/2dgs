@@ -12,6 +12,7 @@
 from argparse import ArgumentParser, Namespace
 import sys
 import os
+import math
 
 class GroupParams:
     pass
@@ -53,6 +54,7 @@ class ModelParams(ParamGroup):
         self._resolution = -1
         self._white_background = False
         self.data_device = "cuda"
+        self.data_cache_mb = 0.0
         self.eval = False
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
         super().__init__(parser, "Loading Parameters", sentinel)
@@ -60,6 +62,10 @@ class ModelParams(ParamGroup):
     def extract(self, args):
         g = super().extract(args)
         g.source_path = os.path.abspath(g.source_path)
+        # Old cfg_args files do not contain this option.
+        g.data_cache_mb = getattr(g, "data_cache_mb", 0.0)
+        if not math.isfinite(g.data_cache_mb) or g.data_cache_mb < 0:
+            raise ValueError("--data_cache_mb must be a finite, non-negative number (0 disables batching)")
         return g
 
 class PipelineParams(ParamGroup):
