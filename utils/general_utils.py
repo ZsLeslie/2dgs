@@ -161,16 +161,21 @@ def create_rotation_matrix_from_direction_vector_batch(direction_vectors):
 
 
 def colormap(img, cmap='jet'):
-    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    # Render directly to an offscreen canvas, independent of the GUI backend
+    # and the lifetime of an SSH-forwarded X11 connection.
     W, H = img.shape[:2]
     dpi = 300
-    fig, ax = plt.subplots(1, figsize=(H/dpi, W/dpi), dpi=dpi)
+    fig = Figure(figsize=(H/dpi, W/dpi), dpi=dpi)
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.subplots()
     im = ax.imshow(img, cmap=cmap)
     ax.set_axis_off()
     fig.colorbar(im, ax=ax)
     fig.tight_layout()
-    fig.canvas.draw()
-    data = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+    canvas.draw()
+    data = np.asarray(canvas.buffer_rgba())[:, :, :3].copy()
     img = torch.from_numpy(data / 255.).float().permute(2,0,1)
-    plt.close()
     return img

@@ -77,6 +77,11 @@ To train a scene, simply use
 ```bash
 python train.py -s <path to COLMAP or NeRF Synthetic dataset>
 ```
+Training logs scalar losses only; it does not run periodic validation or generate
+TensorBoard image previews. PLY saving and checkpoint saving are unchanged.
+`--test_iterations` is accepted for compatibility with existing commands but is
+ignored. Use `render.py` and `metrics.py` separately when evaluation is needed.
+
 To train with images loaded in memory-budgeted batches:
 ```bash
 python train.py -s <path to dataset> --data_cache_mb 1024
