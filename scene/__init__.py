@@ -42,14 +42,27 @@ class Scene:
         self.test_cameras = {}
         lazy_images = getattr(args, "data_cache_mb", 0) > 0
         depths = getattr(args, "depths", "")
+        masks = getattr(args, "masks", "")
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
+            image_root = os.path.join(args.source_path, args.images or "images")
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, lazy_images=lazy_images, depths=depths)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
+            image_root = args.source_path
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, lazy_images=lazy_images, depths=depths)
         else:
             assert False, "Could not recognize scene type!"
+
+        if masks:
+            mask_root = os.path.join(args.source_path, masks)
+            for infos in (scene_info.train_cameras, scene_info.test_cameras):
+                for i, info in enumerate(infos):
+                    relative_name = os.path.relpath(info.image_path, image_root)
+                    mask_path = os.path.join(mask_root, os.path.splitext(relative_name)[0] + ".png")
+                    if not os.path.isfile(mask_path):
+                        raise FileNotFoundError("Mask missing for {}: {}".format(info.image_path, mask_path))
+                    infos[i] = info._replace(mask_path=mask_path)
 
         self.train_depth_count = sum(depth_is_usable(c) for c in scene_info.train_cameras)
         if depths:
@@ -78,9 +91,14 @@ class Scene:
 
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")
-            self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
+            self.train_cameras[resolution_scale] = cameraList_from_camInfos(
+                scene_info.train_cameras, resolution_scale, args, skip_empty_masks=True)
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+            if masks and resolution_scale == 1.0:
+                cameras = self.train_cameras[resolution_scale]
+                self.train_depth_count = (sum(depth_is_usable(c) for c in cameras.cam_infos)
+                                          if hasattr(cameras, "cam_infos") else sum(c.invdepthmap is not None for c in cameras))
         
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,

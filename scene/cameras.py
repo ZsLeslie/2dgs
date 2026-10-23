@@ -18,7 +18,7 @@ class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
-                 invdepthmap=None, depth_mask=None
+                 invdepthmap=None, depth_mask=None, valid_mask=None
                  ):
         super(Camera, self).__init__()
 
@@ -44,6 +44,8 @@ class Camera(nn.Module):
         self.invdepthmap = invdepthmap
         self.depth_mask = depth_mask
         self.depth_reliable = depth_mask is not None and bool(depth_mask.any())
+        self.valid_mask = valid_mask
+        self.valid_ratio = float(valid_mask.float().mean()) if valid_mask is not None else 1.0
 
         if gt_alpha_mask is not None:
             # self.original_image *= gt_alpha_mask.to(self.data_device)

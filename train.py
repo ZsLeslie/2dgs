@@ -12,7 +12,8 @@
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim, inverse_depth_l1_loss
+from utils.loss_utils import l1_loss, ssim, inverse_depth_l1_loss, masked_mean, masked_ssim_loss
+from utils.mask_utils import interior_mask
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -86,8 +87,15 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         
         gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        valid_mask = viewpoint_cam.valid_mask
+        if valid_mask is None:
+            Ll1 = l1_loss(image, gt_image)
+            ssim_loss = 1.0 - ssim(image, gt_image)
+        else:
+            valid_mask = valid_mask.to(image.device)
+            Ll1 = masked_mean((image - gt_image).abs(), valid_mask)
+            ssim_loss = masked_ssim_loss(image, gt_image, valid_mask)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss
         
         # regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
@@ -97,14 +105,18 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
         rend_normal  = render_pkg['rend_normal']
         surf_normal = render_pkg['surf_normal']
         normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-        normal_loss = lambda_normal * (normal_error).mean()
-        dist_loss = lambda_dist * (rend_dist).mean()
+        if valid_mask is None:
+            normal_loss = lambda_normal * normal_error.mean()
+            dist_loss = lambda_dist * rend_dist.mean()
+        else:
+            normal_loss = lambda_normal * masked_mean(normal_error, interior_mask(valid_mask, 3))
+            dist_loss = lambda_dist * masked_mean(rend_dist, valid_mask)
 
         depth_loss = image.new_zeros(())
         depth_weight = depth_l1_weight(iteration)
         if depth_weight > 0 and viewpoint_cam.depth_reliable:
             depth_loss = depth_weight * inverse_depth_l1_loss(
-                render_pkg["surf_depth"], viewpoint_cam.invdepthmap, viewpoint_cam.depth_mask)
+                render_pkg["surf_depth"], viewpoint_cam.invdepthmap, viewpoint_cam.depth_mask, valid_mask)
 
         # loss
         total_loss = loss + dist_loss + normal_loss + depth_loss
@@ -129,6 +141,8 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
                     "depth": f"{ema_depth_for_log:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
                 }
+                if valid_mask is not None:
+                    loss_dict["valid"] = "{:.1%}".format(viewpoint_cam.valid_ratio)
                 progress_bar.set_postfix(loss_dict)
 
                 progress_bar.update(10)
@@ -147,9 +161,11 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/depth_loss', depth_loss.item(), iteration)
                 tb_writer.add_scalar('train_loss_patches/depth_weight', depth_weight, iteration)
+                if valid_mask is not None:
+                    tb_writer.add_scalar('train_mask/valid_ratio', viewpoint_cam.valid_ratio, iteration)
 
                 tb_writer.add_scalar('train_loss_patches/reg_loss', Ll1.item(), iteration)
-                tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
+                tb_writer.add_scalar('train_loss_patches/total_loss', total_loss.item(), iteration)
                 tb_writer.add_scalar('iter_time', iter_start.elapsed_time(iter_end), iteration)
                 tb_writer.add_scalar('total_points', gaussians.get_xyz.shape[0], iteration)
 

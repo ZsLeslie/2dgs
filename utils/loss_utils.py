@@ -13,6 +13,20 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
+from utils.mask_utils import interior_mask
+
+
+def masked_mean(values, mask):
+    """Average over effective weights (including channels); empty masks give zero."""
+    weights = mask.to(device=values.device, dtype=values.dtype).expand_as(values)
+    selected = torch.where(weights > 0, values, torch.zeros_like(values))
+    return (selected * weights).sum() / weights.sum().clamp_min(1e-8)
+
+
+def masked_ssim_loss(img1, img2, mask, window_size=11):
+    # Mask the per-pixel SSIM loss before reducing. Empty interiors contribute 0.
+    valid = interior_mask(mask, window_size)
+    return masked_mean(1 - ssim(img1, img2, window_size=window_size, return_map=True), valid)
 
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
@@ -21,7 +35,7 @@ def l2_loss(network_output, gt):
     return ((network_output - gt) ** 2).mean()
 
 
-def inverse_depth_l1_loss(surface_depth, target_inverse_depth, depth_mask):
+def inverse_depth_l1_loss(surface_depth, target_inverse_depth, depth_mask, valid_mask=None):
     """Compare 2DGS surface Z to calibrated inverse depth, with a 3DGS-style mean.
 
     Surface depth is the expected/median mixture selected by --depth_ratio.
@@ -29,13 +43,19 @@ def inverse_depth_l1_loss(surface_depth, target_inverse_depth, depth_mask):
     """
     target = target_inverse_depth.to(device=surface_depth.device, dtype=surface_depth.dtype)
     mask = depth_mask.to(device=surface_depth.device, dtype=surface_depth.dtype)
+    if valid_mask is not None:
+        mask = mask * valid_mask.to(device=surface_depth.device, dtype=surface_depth.dtype)
     valid_surface = torch.isfinite(surface_depth) & (surface_depth > 1e-6)
     safe_depth = torch.where(valid_surface, surface_depth, torch.ones_like(surface_depth))
     inverse_depth = torch.where(valid_surface, safe_depth.reciprocal(), torch.zeros_like(surface_depth))
     valid_target = torch.isfinite(target) & (target > 0) & torch.isfinite(mask) & (mask > 0)
     target = torch.where(valid_target, target, torch.zeros_like(target))
     mask = torch.where(valid_target, mask, torch.zeros_like(mask))
-    return ((inverse_depth - target).abs() * mask).mean()
+    error = (inverse_depth - target).abs()
+    # Preserve existing depth weighting when --masks is absent.
+    if valid_mask is not None:
+        return masked_mean(error, mask)
+    return (error * mask).mean()
 
 def gaussian(window_size, sigma):
     gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
@@ -57,7 +77,7 @@ def create_window(window_size, channel):
     window = Variable(_2D_window.expand(channel, 1, window_size, window_size).contiguous())
     return window
 
-def ssim(img1, img2, window_size=11, size_average=True):
+def ssim(img1, img2, window_size=11, size_average=True, return_map=False):
     channel = img1.size(-3)
     window = create_window(window_size, channel)
 
@@ -65,9 +85,9 @@ def ssim(img1, img2, window_size=11, size_average=True):
         window = window.cuda(img1.get_device())
     window = window.type_as(img1)
 
-    return _ssim(img1, img2, window, window_size, channel, size_average)
+    return _ssim(img1, img2, window, window_size, channel, size_average, return_map)
 
-def _ssim(img1, img2, window, window_size, channel, size_average=True):
+def _ssim(img1, img2, window, window_size, channel, size_average=True, return_map=False):
     mu1 = F.conv2d(img1, window, padding=window_size // 2, groups=channel)
     mu2 = F.conv2d(img2, window, padding=window_size // 2, groups=channel)
 
@@ -84,6 +104,8 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
 
     ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
 
+    if return_map:
+        return ssim_map
     if size_average:
         return ssim_map.mean()
     else:

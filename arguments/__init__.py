@@ -52,6 +52,7 @@ class ModelParams(ParamGroup):
         self._model_path = ""
         self._images = "images"
         self._depths = ""
+        self.masks = ""
         self._resolution = -1
         self._white_background = False
         self.data_device = "cuda"
@@ -66,6 +67,7 @@ class ModelParams(ParamGroup):
         # Old cfg_args files do not contain this option.
         g.data_cache_mb = getattr(g, "data_cache_mb", 0.0)
         g.depths = getattr(g, "depths", "")
+        g.masks = getattr(g, "masks", "")
         if not math.isfinite(g.data_cache_mb) or g.data_cache_mb < 0:
             raise ValueError("--data_cache_mb must be a finite, non-negative number (0 disables batching)")
         return g

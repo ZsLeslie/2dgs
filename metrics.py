@@ -14,24 +14,72 @@ import os
 from PIL import Image
 import torch
 import torchvision.transforms.functional as tf
-from utils.loss_utils import ssim
+from utils.loss_utils import ssim, masked_mean, masked_ssim_loss
+from utils.mask_utils import load_valid_mask, interior_mask
 from lpipsPyTorch import lpips
 import json
+import ast
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser
 
-def readImages(renders_dir, gt_dir):
+def readImages(renders_dir, gt_dir, names=None):
     renders = []
     gts = []
     image_names = []
-    for fname in os.listdir(renders_dir):
+    for fname in sorted(os.listdir(renders_dir)) if names is None else names:
         render = Image.open(renders_dir / fname)
         gt = Image.open(gt_dir / fname)
         renders.append(tf.to_tensor(render).unsqueeze(0)[:, :3, :, :].cuda())
         gts.append(tf.to_tensor(gt).unsqueeze(0)[:, :3, :, :].cuda())
         image_names.append(fname)
     return renders, gts, image_names
+
+
+def evaluation_manifest(method_dir, scene_dir):
+    manifest_path = method_dir / "mask_manifest.json"
+    if manifest_path.is_file():
+        with open(manifest_path) as file:
+            manifest = json.load(file)
+        return manifest["masked"], manifest["images"]
+    # Legacy exports have no manifest. Do not silently report unmasked metrics
+    # for a model trained with masks; rerender to export aligned indexed masks.
+    cfg_path = Path(scene_dir) / "cfg_args"
+    if cfg_path.is_file():
+        expression = ast.parse(cfg_path.read_text(), mode="eval").body
+        if isinstance(expression, ast.Call):
+            for kw in expression.keywords:
+                if kw.arg == "masks" and ast.literal_eval(kw.value):
+                    raise ValueError("Masked model needs a fresh render.py export with mask_manifest.json")
+    return (method_dir / "masks").is_dir(), None
+
+
+def evaluate_masked_images(renders, gts, image_names, mask_dir):
+    per_view = {name: {} for name in ("L1", "SSIM", "PSNR", "LPIPS", "ValidRatio")}
+    for render, gt, name in tqdm(zip(renders, gts, image_names), total=len(image_names), desc="Masked metrics"):
+        size = (gt.shape[-1], gt.shape[-2])
+        mask = load_valid_mask(str(mask_dir / name), size, size).to(gt.device)
+        ratio = float(mask.float().mean())
+        per_view["ValidRatio"][name] = ratio
+        per_view["LPIPS"][name] = None  # Scalar LPIPS has no mask-aware receptive-field handling.
+        if ratio == 0:
+            for metric in ("L1", "SSIM", "PSNR"):
+                per_view[metric][name] = None
+            continue
+        per_view["L1"][name] = masked_mean((render - gt).abs(), mask).item()
+        mse = masked_mean((render - gt).square(), mask)
+        per_view["PSNR"][name] = (-10 * torch.log10(mse)).item()
+        per_view["SSIM"][name] = ((1 - masked_ssim_loss(render, gt, mask)).item()
+                                  if interior_mask(mask, 11).any() else None)
+    summary = {"Masked": True}
+    for metric, scores in per_view.items():
+        values = [v for v in scores.values() if v is not None]
+        summary[metric] = sum(values) / len(values) if values else None
+    summary["EvaluatedViews"] = sum(v is not None for v in per_view["L1"].values())
+    summary["SSIMViews"] = sum(v is not None for v in per_view["SSIM"].values())
+    if not summary["EvaluatedViews"]:
+        raise ValueError("No valid pixels available for masked evaluation")
+    return summary, per_view
 
 def evaluate(model_paths):
 
@@ -59,9 +107,19 @@ def evaluate(model_paths):
                 per_view_dict_polytopeonly[scene_dir][method] = {}
 
                 method_dir = test_dir / method
+                if not method_dir.is_dir():
+                    continue
                 gt_dir = method_dir/ "gt"
                 renders_dir = method_dir / "renders"
-                renders, gts, image_names = readImages(renders_dir, gt_dir)
+                masked, names = evaluation_manifest(method_dir, scene_dir)
+                renders, gts, image_names = readImages(renders_dir, gt_dir, names)
+
+                if masked:
+                    summary, per_view = evaluate_masked_images(renders, gts, image_names, method_dir / "masks")
+                    print("Masked evaluation (LPIPS not computed):", summary)
+                    full_dict[scene_dir][method] = summary
+                    per_view_dict[scene_dir][method] = per_view
+                    continue
 
                 ssims = []
                 psnrs = []
@@ -88,8 +146,9 @@ def evaluate(model_paths):
                 json.dump(full_dict[scene_dir], fp, indent=True)
             with open(scene_dir + "/per_view.json", 'w') as fp:
                 json.dump(per_view_dict[scene_dir], fp, indent=True)
-        except:
-            print("Unable to compute metrics for model", scene_dir)
+        except Exception as error:
+            print("Unable to compute metrics for model {}: {}".format(scene_dir, error))
+            raise
 
 if __name__ == "__main__":
     device = torch.device("cuda:0")

@@ -13,6 +13,8 @@ import torch
 import numpy as np
 import os
 import copy
+import json
+from PIL import Image
 from tqdm import tqdm
 from utils.render_utils import save_img_f32, save_img_u8
 from functools import partial
@@ -306,10 +308,25 @@ class GaussianExtractor(object):
         os.makedirs(render_path, exist_ok=True)
         os.makedirs(vis_path, exist_ok=True)
         os.makedirs(gts_path, exist_ok=True)
+        mask_path = os.path.join(path, "masks")
+        image_names = []
+        mask_count = 0
         for idx, viewpoint_cam in tqdm(enumerate(self.viewpoint_stack), desc="export images"):
+            filename = '{0:05d}.png'.format(idx)
+            image_names.append(filename)
+            valid_mask = getattr(viewpoint_cam, "valid_mask", None)
+            if valid_mask is not None:
+                os.makedirs(mask_path, exist_ok=True)
+                Image.fromarray(valid_mask[0].cpu().numpy().astype(np.uint8) * 255).save(os.path.join(mask_path, filename))
+                mask_count += 1
             gt = viewpoint_cam.original_image[0:3, :, :]
             save_img_u8(gt.permute(1,2,0).cpu().numpy(), os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
             save_img_u8(self.rgbmaps[idx].permute(1,2,0).cpu().numpy(), os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
             save_img_f32(self.depthmaps[idx][0].cpu().numpy(), os.path.join(vis_path, 'depth_{0:05d}'.format(idx) + ".tiff"))
             # save_img_u8(self.normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'normal_{0:05d}'.format(idx) + ".png"))
             # save_img_u8(self.depth_normals[idx].permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(vis_path, 'depth_normal_{0:05d}'.format(idx) + ".png"))
+        if mask_count not in (0, len(image_names)):
+            raise ValueError("Cannot export a mixture of masked and unmasked evaluation views")
+        # Record the current export so old renders/masks cannot silently affect metrics.
+        with open(os.path.join(path, "mask_manifest.json"), "w") as file:
+            json.dump({"masked": mask_count > 0, "images": image_names}, file, indent=2)

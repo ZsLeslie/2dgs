@@ -90,7 +90,7 @@ python train.py -s <path to dataset> --data_cache_mb 1024
 The default, `0`, keeps the original full-data loading behavior. With a positive
 budget, COLMAP and Blender images are decoded on demand. Each batch is sized by
 the resized floating-point image tensors, including alpha masks and enabled
-inverse-depth maps/validity masks, rather than
+inverse-depth maps/validity masks and supervision masks, rather than
 compressed file sizes. Training still uses one random view per optimizer step;
 every view is visited once per shuffled epoch before starting the next epoch.
 Completed batches are released before loading the next batch. If the entire
@@ -148,7 +148,8 @@ divisor, without a COLMAP calibration JSON.
 
 The loss compares the reciprocal of 2DGS `surf_depth` (selected by
 `--depth_ratio`) with the calibrated inverse depth. It uses masked L1 averaged
-over all image pixels. Non-positive/non-finite target depths and transparent
+over all image pixels when `--masks` is absent, or over the combined effective
+mask weights when `--masks` is enabled. Non-positive/non-finite target depths and transparent
 pixels in images with an alpha mask are excluded. The two depth weights default
 to `1.0` and `0.01`, with exponential decay over `--iterations`; set both to `0`
 to disable the loss. Progress output includes `depth`, and TensorBoard records
@@ -159,6 +160,64 @@ per resized pixel together, and count toward `--data_cache_mb`. They are loaded
 and released with their RGB batch. This also works with eager loading (`0`),
 validation and checkpoint resume. The depth directory is saved in `cfg_args`;
 pass `--depths ""` to render an existing model without loading supervision files.
+
+### Supervision masks
+
+```bash
+python train.py -s <path to dataset> --masks masks --depths depths --data_cache_mb 1024
+```
+`--masks` takes an absolute directory or a directory relative to the dataset.
+Depth supervision is optional. Black pixels are ignored; any nonzero grayscale
+or RGB value is valid. This first version uses binary masks, not confidence
+weights. A PNG's alpha channel is ignored when interpreting the mask.
+
+For COLMAP, `images/camera1/frame.jpg` matches `masks/camera1/frame.png`.
+For Blender, `file_path: "./train/r_0"` matches `masks/train/r_0.png`. Preserve
+relative subdirectories and replace only the final extension. Each mask must
+have the same original dimensions as its RGB image. Masks are resized to the
+training resolution with nearest-neighbor interpolation. Missing or misaligned
+masks raise an error, including for held-out evaluation views.
+
+The masks affect training losses, without forcing background opacity or changing
+the RGB targets. Each loss has its own support:
+
+| Loss | Valid pixels |
+| --- | --- |
+| RGB L1 | Input mask |
+| SSIM | Centers of fully valid 11×11 windows, inside the image |
+| Depth | Input mask intersected with depth validity and existing depth alpha weights |
+| Normal consistency | Centers of fully valid 3×3 neighborhoods, inside the image |
+| Depth distortion | Input mask |
+
+Each masked loss is divided by its effective weight sum (and channel count
+where applicable). An empty support contributes zero for that loss. This changes
+the effective strength of depth supervision compared with its original
+whole-image normalization; the existing depth weights still control its strength.
+Training views whose resized masks are entirely black are removed before
+sampling. If none remain, training fails with a clear error. Views with less than
+1% valid pixels produce a warning. Progress output shows `valid`, and TensorBoard
+records `train_mask/valid_ratio`.
+
+Initialization scans one mask at a time; cached masks use one byte per resized
+pixel and count toward `--data_cache_mb`. RGB/depth/masks share the same batch
+lifetime. Masks are stored on CPU and transferred for the active training view;
+neighborhood masks are derived during that step. Omitting `--masks` preserves the
+existing unmasked loss behavior.
+
+For evaluation, run the existing export and metric commands:
+```bash
+python render.py -m <model path> --skip_mesh
+python metrics.py -m <model path>
+```
+`render.py` reads the saved mask setting and exports aligned masks plus a
+`mask_manifest.json`. `metrics.py` uses that manifest to report masked L1, PSNR,
+SSIM, valid-pixel ratios and evaluated-view counts. Entirely black views are
+excluded; views without a valid SSIM window have `SSIM: null` and are excluded
+from the SSIM average. Masked LPIPS is reported as `null`, because the current
+scalar LPIPS implementation cannot exclude invalid receptive fields correctly.
+Unmasked evaluation retains the original metrics. Older exports from masked
+models must be regenerated. To explicitly evaluate a full image, rerender with
+`--masks ""`; the new manifest prevents stale mask files from being applied.
 
 Commandline arguments for regularizations
 ```bash

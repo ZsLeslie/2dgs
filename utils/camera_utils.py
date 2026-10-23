@@ -15,6 +15,8 @@ from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal
 from utils.image_loading import ImageSource
 from utils.depth_utils import depth_is_usable, load_inverse_depth
+from utils.mask_utils import load_valid_mask
+import warnings
 from collections.abc import Sequence
 import torch
 
@@ -62,12 +64,16 @@ def loadCam(args, id, cam_info, resolution_scale):
             image.close()
 
     invdepthmap, depth_mask = load_inverse_depth(cam_info, resolution, loaded_mask)
+    valid_mask = (load_valid_mask(cam_info.mask_path, cam_info.image.size, resolution)
+                  if cam_info.mask_path else None)
+    if depth_mask is not None and valid_mask is not None:
+        depth_mask *= valid_mask
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device,
-                  invdepthmap=invdepthmap, depth_mask=depth_mask)
+                  invdepthmap=invdepthmap, depth_mask=depth_mask, valid_mask=valid_mask)
 
 class CameraDataset(Sequence):
     """List-like camera metadata; indexing loads only the requested image."""
@@ -84,6 +90,8 @@ class CameraDataset(Sequence):
             bytes_per_pixel = min(info.image.channels, 4) * pixel_bytes
             if depth_is_usable(info):
                 bytes_per_pixel += 8  # float32 inverse depth + float32 validity mask
+            if info.mask_path:
+                bytes_per_pixel += 1  # bool supervision mask
             self.image_sizes.append(width * height * bytes_per_pixel)
 
     def __len__(self):
@@ -102,7 +110,28 @@ class CameraDataset(Sequence):
         return self.image_sizes[index]
 
 
-def cameraList_from_camInfos(cam_infos, resolution_scale, args):
+def cameraList_from_camInfos(cam_infos, resolution_scale, args, skip_empty_masks=False):
+    if getattr(args, "masks", ""):
+        prepared = []
+        empty, sparse = 0, 0
+        # Scan one mask at a time; do not retain decoded masks for the dataset.
+        for info in cam_infos:
+            mask = load_valid_mask(info.mask_path, info.image.size, camera_resolution(args, info, resolution_scale))
+            ratio = float(mask.float().mean())
+            del mask
+            if ratio == 0 and skip_empty_masks:
+                empty += 1
+                continue
+            if 0 < ratio < 0.01:
+                sparse += 1
+            prepared.append(info)
+        if empty:
+            print("Skipped {} all-black training masks at resolution scale {}".format(empty, resolution_scale))
+        if sparse:
+            warnings.warn("{} views have less than 1% valid pixels at resolution scale {}".format(sparse, resolution_scale))
+        if skip_empty_masks and not prepared:
+            raise ValueError("No training views have valid mask pixels at resolution scale {}".format(resolution_scale))
+        cam_infos = prepared
     if getattr(args, "data_cache_mb", 0) > 0:
         return CameraDataset(cam_infos, resolution_scale, args)
     return [loadCam(args, id, c, resolution_scale) for id, c in enumerate(cam_infos)]

@@ -39,6 +39,7 @@ class CameraInfo(NamedTuple):
     depth_path: str = ""
     depth_params: dict = None
     is_nerf_synthetic: bool = False
+    mask_path: str = ""
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
