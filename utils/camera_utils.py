@@ -12,7 +12,7 @@
 from scene.cameras import Camera
 import numpy as np
 from utils.general_utils import PILtoTorch
-from utils.graphics_utils import fov2focal
+from utils.graphics_utils import fov2focal, getWorld2View2
 from utils.image_loading import ImageSource
 from utils.depth_utils import depth_is_usable, load_inverse_depth
 from collections.abc import Sequence
@@ -100,6 +100,11 @@ class CameraDataset(Sequence):
 
     def image_nbytes(self, index):
         return self.image_sizes[index]
+
+    def camera_to_worlds(self):
+        """Match Camera's default transforms without decoding image pixels."""
+        return np.array([np.linalg.inv(getWorld2View2(info.R, info.T))
+                         for info in self.cam_infos])
 
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):

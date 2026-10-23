@@ -88,7 +88,10 @@ if __name__ == "__main__":
         os.makedirs(train_dir, exist_ok=True)
         # set the active_sh to 0 to export only diffuse texture
         gaussExtractor.gaussians.active_sh_degree = 0
-        gaussExtractor.reconstruction(scene.getTrainCameras())
+        if not args.unbounded and dataset.data_cache_mb > 0:
+            gaussExtractor.prepare_reconstruction(scene.getTrainCameras())
+        else:
+            gaussExtractor.reconstruction(scene.getTrainCameras())
         # extract the mesh and save
         if args.unbounded:
             name = 'fuse_unbounded.ply'
@@ -98,7 +101,8 @@ if __name__ == "__main__":
             depth_trunc = (gaussExtractor.radius * 2.0) if args.depth_trunc < 0  else args.depth_trunc
             voxel_size = (depth_trunc / args.mesh_res) if args.voxel_size < 0 else args.voxel_size
             sdf_trunc = 5.0 * voxel_size if args.sdf_trunc < 0 else args.sdf_trunc
-            mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc)
+            mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc,
+                                                       data_cache_mb=dataset.data_cache_mb)
         
         o3d.io.write_triangle_mesh(os.path.join(train_dir, name), mesh)
         print("mesh saved at {}".format(os.path.join(train_dir, name)))

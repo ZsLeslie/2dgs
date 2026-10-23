@@ -175,6 +175,23 @@ To export a mesh within a bounded volume, simply use
 ```bash
 python render.py -m <path to pre-trained model> -s <path to COLMAP dataset> 
 ```
+To fuse views in memory-budgeted batches, use the same `--data_cache_mb` option
+as training (in MiB):
+```bash
+python render.py -m <path to pre-trained model> -s <path to COLMAP dataset> \
+    --data_cache_mb 1024 --skip_train --skip_test
+```
+With a positive budget, bounded extraction loads camera images in their original
+order, renders and integrates each view into one shared TSDF volume, then releases
+the view and its rendered RGB/depth maps. It does not cache all rendered maps.
+Global bounds and default mesh parameters still use all camera poses. Batch sizes
+use the same resized image/alpha/depth tensor accounting as training; a view larger
+than the budget is loaded alone with a warning. The budget excludes the Gaussian
+model, TSDF volume, mesh, render buffers and decoding temporaries, so it is not a
+total RAM/VRAM limit. `--data_cache_mb 0` keeps the cached extraction path.
+The skip flags above avoid the separate train/test image exports, which still
+cache rendered maps; `--unbounded` also retains its existing render cache.
+
 Commandline arguments you should adjust accordingly for meshing for bounded TSDF fusion, use
 ```bash
 --depth_ratio # 0 for mean depth and 1 for median depth
