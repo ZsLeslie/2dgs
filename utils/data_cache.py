@@ -13,9 +13,10 @@ class CameraBatchIterator:
     must release the returned camera before advancing to the next batch.
     Model, render outputs, TSDF storage and decoding temporaries are excluded.
     A camera larger than the budget is loaded alone.
+    Optional log(message) reports each batch after its cameras have loaded.
     """
 
-    def __init__(self, cameras, cache_mb):
+    def __init__(self, cameras, cache_mb, log=None):
         if not math.isfinite(cache_mb) or cache_mb <= 0:
             raise ValueError("Camera batch cache must be finite and positive")
         self.cameras = cameras
@@ -23,6 +24,8 @@ class CameraBatchIterator:
         self.next_index = 0
         self.batch = deque()
         self.warned_oversize = False
+        self.batch_count = 0
+        self.log = log
 
     def __iter__(self):
         return self
@@ -31,6 +34,7 @@ class CameraBatchIterator:
         if not self.batch:
             if self.next_index == len(self.cameras):
                 raise StopIteration
+            batch_start = self.next_index
             cached_bytes = 0
             while self.next_index < len(self.cameras):
                 size = self.cameras.image_nbytes(self.next_index)
@@ -45,6 +49,16 @@ class CameraBatchIterator:
                 self.batch.append(self.cameras[self.next_index])
                 self.next_index += 1
                 cached_bytes += size
+            self.batch_count += 1
+            if self.log is not None:
+                self.log(
+                    "[Camera batch {}] Loaded views {}-{} / {}: {} images, "
+                    "estimated {:.2f} MiB / budget {:.2f} MiB".format(
+                        self.batch_count, batch_start + 1, self.next_index,
+                        len(self.cameras), len(self.batch),
+                        cached_bytes / 1024**2, self.budget_bytes / 1024**2,
+                    )
+                )
         return self.batch.popleft()
 
 

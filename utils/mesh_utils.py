@@ -196,7 +196,7 @@ class GaussianExtractor(object):
         )
 
         if data_cache_mb > 0:
-            cameras = CameraBatchIterator(self.viewpoint_stack, data_cache_mb)
+            cameras = CameraBatchIterator(self.viewpoint_stack, data_cache_mb, log=tqdm.write)
             print(f'Camera image batch budget: {data_cache_mb:.2f} MiB')
         else:
             cameras = iter(self.viewpoint_stack)
@@ -232,6 +232,10 @@ class GaussianExtractor(object):
             # Release the active view and render before loading the next batch.
             del viewpoint_cam, cam_o3d, rgb, depth, rgbd
 
+        if data_cache_mb > 0:
+            print("TSDF integration complete: {} views in {} batches.".format(
+                len(self.viewpoint_stack), cameras.batch_count))
+        print("Extracting triangle mesh ...")
         mesh = volume.extract_triangle_mesh()
         return mesh
 

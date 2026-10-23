@@ -192,6 +192,13 @@ total RAM/VRAM limit. `--data_cache_mb 0` keeps the cached extraction path.
 The skip flags above avoid the separate train/test image exports, which still
 cache rendered maps; `--unbounded` also retains its existing render cache.
 
+Each loaded batch prints `[Camera batch N]` with its 1-based view range, image
+count and estimated pixel-data size versus the budget. After fusion, the total
+number of views and batches is printed. The TSDF progress bar still tracks all
+views across batches. A final batch count of one means only one batch was needed;
+lower `--data_cache_mb` to use smaller batches. Reported sizes are the tensor
+budget estimates, not measured process RAM/VRAM usage.
+
 Use `--mesh_output_dir /path/to/meshes` to save both `fuse.ply` and
 `fuse_post.ply` in a custom directory, which is created automatically. This also
 applies to `--unbounded` (`fuse_unbounded.ply` and `fuse_unbounded_post.ply`).
