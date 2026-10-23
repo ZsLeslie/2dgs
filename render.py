@@ -34,6 +34,8 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--skip_mesh", action="store_true")
+    parser.add_argument("--mesh_output_dir", default="", type=str,
+                        help="Mesh output directory (default: <model_path>/train/ours_<iteration>)")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--render_path", action="store_true")
     parser.add_argument("--voxel_size", default=-1.0, type=float, help='Mesh: voxel size for TSDF')
@@ -85,7 +87,8 @@ if __name__ == "__main__":
 
     if not args.skip_mesh:
         print("export mesh ...")
-        os.makedirs(train_dir, exist_ok=True)
+        mesh_dir = os.path.abspath(os.path.expanduser(args.mesh_output_dir)) if args.mesh_output_dir else train_dir
+        os.makedirs(mesh_dir, exist_ok=True)
         # set the active_sh to 0 to export only diffuse texture
         gaussExtractor.gaussians.active_sh_degree = 0
         if not args.unbounded and dataset.data_cache_mb > 0:
@@ -104,9 +107,13 @@ if __name__ == "__main__":
             mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc,
                                                        data_cache_mb=dataset.data_cache_mb)
         
-        o3d.io.write_triangle_mesh(os.path.join(train_dir, name), mesh)
-        print("mesh saved at {}".format(os.path.join(train_dir, name)))
+        mesh_path = os.path.join(mesh_dir, name)
+        if not o3d.io.write_triangle_mesh(mesh_path, mesh):
+            raise OSError("Failed to save mesh at {}".format(mesh_path))
+        print("mesh saved at {}".format(mesh_path))
         # post-process the mesh and save, saving the largest N clusters
         mesh_post = post_process_mesh(mesh, cluster_to_keep=args.num_cluster)
-        o3d.io.write_triangle_mesh(os.path.join(train_dir, name.replace('.ply', '_post.ply')), mesh_post)
-        print("mesh post processed saved at {}".format(os.path.join(train_dir, name.replace('.ply', '_post.ply'))))
+        mesh_post_path = os.path.join(mesh_dir, name.replace('.ply', '_post.ply'))
+        if not o3d.io.write_triangle_mesh(mesh_post_path, mesh_post):
+            raise OSError("Failed to save post-processed mesh at {}".format(mesh_post_path))
+        print("mesh post processed saved at {}".format(mesh_post_path))

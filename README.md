@@ -192,6 +192,12 @@ total RAM/VRAM limit. `--data_cache_mb 0` keeps the cached extraction path.
 The skip flags above avoid the separate train/test image exports, which still
 cache rendered maps; `--unbounded` also retains its existing render cache.
 
+Use `--mesh_output_dir /path/to/meshes` to save both `fuse.ply` and
+`fuse_post.ply` in a custom directory, which is created automatically. This also
+applies to `--unbounded` (`fuse_unbounded.ply` and `fuse_unbounded_post.ply`).
+Relative paths are resolved from the current working directory. If omitted,
+meshes are saved under `<model_path>/train/ours_<iteration>` as before.
+
 Commandline arguments you should adjust accordingly for meshing for bounded TSDF fusion, use
 ```bash
 --depth_ratio # 0 for mean depth and 1 for median depth
