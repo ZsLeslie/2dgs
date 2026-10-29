@@ -12,4 +12,4 @@ tests
 *.out
 eval
 *.npz
-**/tmp
+scripts/test_voxel_masks.py
