@@ -17,6 +17,7 @@ import os
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import RGB2SH
+from utils.voxel_constraint import SparseVoxelGrid
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
@@ -56,10 +57,13 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        self.voxel_grid = None
+        self.voxel_inside_grad_threshold = None
+        self.voxel_outside_grad_threshold = None
         self.setup_functions()
 
     def capture(self):
-        return (
+        state = (
             self.active_sh_degree,
             self._xyz,
             self._features_dc,
@@ -73,8 +77,43 @@ class GaussianModel:
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
+        if self.voxel_grid is not None:
+            state += ({"kind": "black_mask_voxel_v1", "grid": self.voxel_grid.state_dict()},)
+        return state
+
+    def configure_voxel_densification(self, options, seed_mask=None, grid_state=None):
+        self.voxel_grid = None
+        if not getattr(options, "voxel_densify", False):
+            return
+        self.voxel_inside_grad_threshold = options.voxel_inside_grad_threshold
+        self.voxel_outside_grad_threshold = options.voxel_outside_grad_threshold
+        if grid_state is not None:
+            self.voxel_grid = SparseVoxelGrid.from_state_dict(grid_state, self._xyz.device)
+            print("[Voxel] restored fixed black-mask grid; saved size/dilation take precedence")
+        else:
+            mask = torch.as_tensor(seed_mask, dtype=torch.bool, device=self._xyz.device)
+            if mask.shape != (len(self._xyz),) or not mask.any():
+                raise ValueError("Black-mask voxel seeds must select at least one initial point")
+            self.voxel_grid = SparseVoxelGrid(self._xyz.detach()[mask], options.voxel_size, options.voxel_dilation)
+            print("[Voxel] black-mask seeds={} training points={} (full point cloud)".format(
+                int(mask.sum()), len(self._xyz)))
+        print("[Voxel] occupied={} size={} dilation={} thresholds(in/out)={}/{}".format(
+            len(self.voxel_grid.keys), self.voxel_grid.voxel_size, self.voxel_grid.dilation,
+            self.voxel_inside_grad_threshold, self.voxel_outside_grad_threshold))
+
+    @staticmethod
+    def checkpoint_voxel_grid(model_args):
+        if len(model_args) == 12:
+            return None
+        if (len(model_args) != 13 or not isinstance(model_args[12], dict)
+                or model_args[12].get("kind") != "black_mask_voxel_v1"):
+            raise ValueError("Incompatible voxel checkpoint; expected a black-mask grid or legacy 12-field checkpoint")
+        return model_args[12]["grid"]
     
     def restore(self, model_args, training_args):
+        grid_state = self.checkpoint_voxel_grid(model_args)
+        if getattr(training_args, "voxel_densify", False) and grid_state is not None:
+            self.configure_voxel_densification(training_args, grid_state=grid_state)
         (self.active_sh_degree, 
         self._xyz, 
         self._features_dc, 
@@ -86,7 +125,7 @@ class GaussianModel:
         xyz_gradient_accum, 
         denom,
         opt_dict, 
-        self.spatial_lr_scale) = model_args
+        self.spatial_lr_scale) = model_args[:12]
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -350,6 +389,12 @@ class GaussianModel:
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[:grads.shape[0]] = grads.squeeze()
+        if torch.is_tensor(grad_threshold) and grad_threshold.ndim > 0:
+            # Thresholds belong to the pre-clone population. New clones have
+            # no accumulated gradient and cannot become split parents here.
+            padded_threshold = padded_grad.new_full((n_init_points,), float("inf"))
+            padded_threshold[:grads.shape[0]] = grad_threshold.reshape(-1)
+            grad_threshold = padded_threshold
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
@@ -390,8 +435,17 @@ class GaussianModel:
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
+        if self.voxel_grid is not None:
+            inside = self.voxel_grid.contains(self._xyz)
+            before = len(self._xyz)
+            max_grad = torch.where(inside, grads.new_tensor(self.voxel_inside_grad_threshold),
+                                   grads.new_tensor(self.voxel_outside_grad_threshold))
+
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
+
+        if self.voxel_grid is not None:
+            after_densify = len(self._xyz)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -400,6 +454,11 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
 
+        if self.voxel_grid is not None:
+            count_inside = int(inside.sum())
+            print("[Voxel densify] before={} (in={} out={}) net_densify={} pruned={} current={}".format(
+                before, count_inside, before-count_inside, after_densify-before,
+                after_densify-len(self._xyz), len(self._xyz)))
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):

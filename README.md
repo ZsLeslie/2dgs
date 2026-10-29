@@ -323,3 +323,56 @@ If you find our code or paper helps, please consider citing:
     doi       = {10.1145/3641519.3657428}
 }
 ```
+
+## Black-mask voxel densification
+
+Enable fixed voxel guidance from the **black** regions of `mask_tower`:
+
+```bash
+python train.py -s /path/to/colmap -m output/black_voxel \
+  --voxel_densify --voxel_masks mask_tower \
+  --voxel_black_threshold 0 --voxel_size 0.05 --voxel_dilation 2 \
+  --voxel_inside_grad_threshold 0.0002 \
+  --voxel_outside_grad_threshold 0.0001
+```
+
+`--voxel_densify` defaults to off. Both spatial gradient thresholds default to
+`0.0002`; either may be larger. Lower thresholds make more points eligible for
+clone/split. With guidance enabled, these two values replace
+`--densify_grad_threshold`. The example applies a higher threshold inside the
+black-mask grid and a lower threshold outside it. Names describe grid membership,
+not foreground/background semantics.
+
+The mask path is relative to `-s`, or absolute. For registered image
+`subdir/frame.jpg`, supply `mask_tower/subdir/frame.png`. Masks must match the
+original image and COLMAP camera dimensions, independently of training `-r`.
+A point becomes a seed only if it has at least one checked COLMAP feature
+observation and **every** checked observation falls on a pixel whose grayscale
+value is `<= --voxel_black_threshold` (default 0, pure black; range 0–254).
+This is not simply the complement of the all-white selection: mixed observations,
+invalid/out-of-image coordinates and unobserved points do not become seeds.
+Only registered images present in `--images` are checked, including evaluation
+views. Missing masks, size mismatches and empty seed selections raise errors.
+Binary and text COLMAP models are supported. Initial PLY coordinates must match
+the original COLMAP points at float32 precision; reordering and subsets are
+supported, with conservative handling of duplicate coordinates.
+
+The training point cloud remains complete, with its original colors. Seeds only
+initialize an immutable sparse grid in COLMAP world units. Dilation uses a cube
+of neighbouring cells, queried implicitly without allocating a dense grid.
+During densification, current Gaussian centers determine which threshold applies.
+A white-mask point can still lie inside a dilated black-mask grid, so the startup
+and densification logs report actual spatial membership.
+
+Clone/split scale conditions, parent removal, opacity reset, pruning (including
+`max_radii2D` clearing), losses and full-image supervision retain the `main`
+behavior. This implementation adds no population caps or opacity grace schedule.
+With equal inside/outside thresholds, its densification and pruning match the
+original scalar-threshold path on the same inputs.
+
+New checkpoints save the fixed grid with a black-mask format tag. Resuming one
+restores that grid without rereading masks; saved voxel size/dilation take
+precedence, while current CLI gradient thresholds apply. Legacy 12-field
+checkpoints build a grid from the original input point cloud before restoring
+trained centers. The old white-mask branch's grid format is rejected explicitly.
+PLY outputs and input COLMAP files are unchanged.

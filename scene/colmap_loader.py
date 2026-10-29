@@ -80,7 +80,7 @@ def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
     data = fid.read(num_bytes)
     return struct.unpack(endian_character + format_char_sequence, data)
 
-def read_points3D_text(path):
+def read_points3D_text(path, return_ids=False):
     """
     see: src/base/reconstruction.cc
         void Reconstruction::ReadPoints3DText(const std::string& path)
@@ -103,6 +103,7 @@ def read_points3D_text(path):
     xyzs = np.empty((num_points, 3))
     rgbs = np.empty((num_points, 3))
     errors = np.empty((num_points, 1))
+    point_ids = np.empty(num_points, dtype=np.int64) if return_ids else None
     count = 0
     with open(path, "r") as fid:
         while True:
@@ -112,6 +113,8 @@ def read_points3D_text(path):
             line = line.strip()
             if len(line) > 0 and line[0] != "#":
                 elems = line.split()
+                if return_ids:
+                    point_ids[count] = int(elems[0])
                 xyz = np.array(tuple(map(float, elems[1:4])))
                 rgb = np.array(tuple(map(int, elems[4:7])))
                 error = np.array(float(elems[7]))
@@ -120,9 +123,9 @@ def read_points3D_text(path):
                 errors[count] = error
                 count += 1
 
-    return xyzs, rgbs, errors
+    return (xyzs, rgbs, errors, point_ids) if return_ids else (xyzs, rgbs, errors)
 
-def read_points3D_binary(path_to_model_file):
+def read_points3D_binary(path_to_model_file, return_ids=False):
     """
     see: src/base/reconstruction.cc
         void Reconstruction::ReadPoints3DBinary(const std::string& path)
@@ -136,10 +139,13 @@ def read_points3D_binary(path_to_model_file):
         xyzs = np.empty((num_points, 3))
         rgbs = np.empty((num_points, 3))
         errors = np.empty((num_points, 1))
+        point_ids = np.empty(num_points, dtype=np.int64) if return_ids else None
 
         for p_id in range(num_points):
             binary_point_line_properties = read_next_bytes(
                 fid, num_bytes=43, format_char_sequence="QdddBBBd")
+            if return_ids:
+                point_ids[p_id] = binary_point_line_properties[0]
             xyz = np.array(binary_point_line_properties[1:4])
             rgb = np.array(binary_point_line_properties[4:7])
             error = np.array(binary_point_line_properties[7])
@@ -151,7 +157,7 @@ def read_points3D_binary(path_to_model_file):
             xyzs[p_id] = xyz
             rgbs[p_id] = rgb
             errors[p_id] = error
-    return xyzs, rgbs, errors
+    return (xyzs, rgbs, errors, point_ids) if return_ids else (xyzs, rgbs, errors)
 
 def read_intrinsics_text(path):
     """

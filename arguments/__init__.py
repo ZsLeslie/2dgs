@@ -102,10 +102,29 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
+        self.voxel_densify = False
+        self.voxel_masks = "mask_tower"
+        self.voxel_black_threshold = 0
+        self.voxel_size = 0.05
+        self.voxel_dilation = 2
+        self.voxel_inside_grad_threshold = 0.0002
+        self.voxel_outside_grad_threshold = 0.0002
         super().__init__(parser, "Optimization Parameters")
 
     def extract(self, args):
         group = super().extract(args)
+        if group.voxel_densify:
+            if not group.voxel_masks:
+                raise ValueError("--voxel_masks must specify a mask directory")
+            if not 0 <= group.voxel_black_threshold <= 254:
+                raise ValueError("--voxel_black_threshold must be between 0 and 254")
+            if not math.isfinite(group.voxel_size) or group.voxel_size <= 0:
+                raise ValueError("--voxel_size must be finite and positive")
+            if group.voxel_dilation < 0:
+                raise ValueError("--voxel_dilation must be non-negative")
+            if any(not math.isfinite(v) or v < 0 for v in
+                   (group.voxel_inside_grad_threshold, group.voxel_outside_grad_threshold)):
+                raise ValueError("Voxel densification thresholds must be finite and non-negative")
         weights = (group.depth_l1_weight_init, group.depth_l1_weight_final)
         if any(not math.isfinite(w) or w < 0 for w in weights):
             raise ValueError("Depth loss weights must be finite and non-negative")

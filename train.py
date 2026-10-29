@@ -23,6 +23,7 @@ from utils.image_utils import render_net_image
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from utils.data_cache import CameraBatchSampler
+from utils.voxel_masks import load_voxel_seed_mask
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -36,9 +37,16 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
     scene = Scene(dataset, gaussians)
     if getattr(dataset, "depths", "") and opt.depth_l1_weight_init > 0 and scene.train_depth_count == 0:
         raise ValueError("No training views have usable depth calibration; check depth_params.json")
-    gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
+    saved_grid = gaussians.checkpoint_voxel_grid(model_params) if checkpoint else None
+    if opt.voxel_densify and saved_grid is None:
+        seed_mask = load_voxel_seed_mask(
+            gaussians.get_xyz.detach().cpu().numpy(), dataset.source_path,
+            dataset.images, opt.voxel_masks, opt.voxel_black_threshold)
+        gaussians.configure_voxel_densification(opt, seed_mask=seed_mask)
+    gaussians.training_setup(opt)
+    if checkpoint:
         gaussians.restore(model_params, opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
